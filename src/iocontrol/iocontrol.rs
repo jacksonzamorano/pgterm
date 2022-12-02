@@ -47,7 +47,7 @@ impl IOControl {
                 credentials.username = r;
             }
         }
-        if credentials.password == "" {
+        if credentials.password == "" && credentials.pass_required {
             if let Some(r) = self.ask_for("Password:") {
                 credentials.password = r;
             }
@@ -73,12 +73,37 @@ impl IOControl {
         return Some(read.trim().to_string());
     }
 
+    pub fn create_table(&mut self, header: &[String], values: Vec<Vec<String>>, col_size: usize) {
+        let mut lines: Vec<String> = Vec::new();
+        let mut header_line = "| ".to_string();
+        for v in header {
+            header_line += &self.pad_value(v.clone(), col_size.clone());
+            header_line += " | ";
+        }
+        lines.push(header_line[0..header_line.chars().count() - 1].to_string());
+        for l in values {
+            let mut line = "| ".to_string();
+            for v in l {
+                let input_val = v.to_owned();
+                line += &self.pad_value(input_val, col_size.clone());
+                line += " | ";
+            }
+            lines.push(line[0..line.chars().count() - 1].to_string());
+        }
+        self.publish_lines(&lines);
+    }
+
     pub fn publish_lines(&mut self, lines: &[String]) {
         let mut handle = self.cout.lock();
         for l in lines {
             _ = handle.write_all(l.as_bytes());
             _ = handle.write(&[b'\n']);
         }
+    }
+    pub fn publish(&mut self, l: &str) {
+        let mut handle = self.cout.lock();
+        _ = handle.write_all(l.as_bytes());
+        _ = handle.write(&[b'\n']);
     }
 
     pub fn announce(&mut self, titles: &[&str]) {
@@ -132,7 +157,18 @@ impl IOControl {
         // self.clear();
     }
 
-    pub fn pad_value(&self, mut input: String, mut fixed_size: usize) -> String {
+    pub fn command_error(&mut self, command: &str, usage: &str) {
+        let mut output = String::new();
+        output += command;
+        output += ": ";
+        output += usage;
+        self.publish_lines(&[
+            "Invalid usage!".to_string(),
+            output
+        ]);
+    }
+
+    fn pad_value(&self, mut input: String, mut fixed_size: usize) -> String {
     	let mut line = String::new();
         let mut val_size = input.chars().count();
         if val_size > fixed_size {

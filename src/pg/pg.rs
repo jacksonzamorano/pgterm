@@ -16,9 +16,10 @@ impl PostgresConnection {
 
     pub fn connect(&mut self) -> bool {
         let connection_string = format!(
-            "host = {} user = {} password = {} dbname = {}",
+            "host = {} user = {} {}{} dbname = {}",
             self.credentials.host,
             self.credentials.username,
+            if self.credentials.pass_required { "password = " } else { "" },
             self.credentials.password,
             self.credentials.database
         );
@@ -53,14 +54,23 @@ impl PostgresConnection {
                         let mut data: Vec<Box<dyn PostgresRow>> = Vec::new();
                         for c in &column_names {
                             if c.1 == Type::BOOL {
-                                let value: bool = row.get(c.0.as_str());
-                                data.push(Box::new(PostgresBoolRow { value }))
+                                let matched: Box<dyn PostgresRow> = match row.try_get::<&str, bool>(c.0.as_str()) {
+                                    Ok(val) => Box::new(PostgresBoolRow { value: val }),
+                                    Err(_) => Box::new(PostgresNullRow {})
+                                };
+                                data.push(matched)
                             } else if c.1 == Type::INT2 || c.1 == Type::INT4 || c.1 == Type::INT8 {
-                                let value: i32 = row.get(c.0.as_str());
-                                data.push(Box::new(PostgresI32Row { value }))
+                                let matched: Box<dyn PostgresRow> = match row.try_get::<&str, i32>(c.0.as_str()) {
+                                    Ok(val) => Box::new(PostgresI32Row { value: val }),
+                                    Err(_) => Box::new(PostgresNullRow {})
+                                };
+                                data.push(matched)
                             } else if c.1 == Type::TEXT {
-                                let value: String = row.get(c.0.as_str());
-                                data.push(Box::new(PostgresStringRow { value }))
+                                let matched: Box<dyn PostgresRow> = match row.try_get::<&str, String>(c.0.as_str()) {
+                                    Ok(val) => Box::new(PostgresStringRow { value: val }),
+                                    Err(_) => Box::new(PostgresNullRow {})
+                                };
+                                data.push(matched)
                             }
                         }
                         values.push(data);
@@ -76,11 +86,40 @@ impl PostgresConnection {
             None
         }
     }
+
+    pub fn describe_table(&mut self, table: &String) -> Option<Vec<PostgresColumn>> {
+        if let Some(client) = &mut self.client {
+            let mut values: Vec<PostgresColumn> = Vec::new();
+            let query = client.query(&format!("select column_name, data_type, is_nullable from information_schema.columns where table_name='{}';", table), &[]);
+            match query {
+                Ok(rows) => {
+                    for row in rows {
+                        let t: &str = row.get("is_nullable");
+                        values.push(PostgresColumn {
+                            name: row.get("column_name"),
+                            data_type: row.get("data_type"),
+                            is_nullable: if t == "NO" { false } else { true },
+                        });
+                    }
+                }
+                Err(er) => println!("{:?}", er),
+            }
+            Some(values)
+        } else {
+            None
+        }
+    }
 }
 
 pub struct PostgresResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Box<dyn PostgresRow>>>,
+}
+
+pub struct PostgresColumn {
+    pub name: String,
+    pub data_type: String,
+    pub is_nullable: bool,
 }
 
 pub trait PostgresRow {
@@ -115,18 +154,26 @@ impl PostgresRow for PostgresBoolRow {
         };
     }
 }
+pub struct PostgresNullRow {}
+impl PostgresRow for PostgresNullRow {
+    fn value(&self) -> String {
+        return String::new();
+    }
+}
 
 pub struct PostgresCredentials {
     pub host: String,
     pub username: String,
     pub password: String,
     pub database: String,
+    pub pass_required: bool
 }
 impl PostgresCredentials {
     const HOST_KEY: &str = "url";
     const USERNAME_KEY: &str = "user";
     const PASSWORD_KEY: &str = "pass";
     const DATABASE_KEY: &str = "db";
+    const NOPASS_KEY: &str = "np";
 
     pub fn create_from_params(params: &HashMap<String, String>) -> PostgresCredentials {
         let host = params
@@ -145,11 +192,16 @@ impl PostgresCredentials {
             .get(&PostgresCredentials::DATABASE_KEY.to_string())
             .unwrap_or(&String::new())
             .to_string();
+        let nopass = params
+            .get(&PostgresCredentials::NOPASS_KEY.to_string())
+            .unwrap_or(&String::new())
+            .to_string();
         PostgresCredentials {
             host,
             username,
             password,
             database,
+            pass_required: nopass == "y"
         }
     }
 }
