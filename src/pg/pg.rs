@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use postgres::{types::Type, Client, NoTls};
+use postgres::{
+    types::{private::BytesMut, FromSql, IsNull, ToSql, Type},
+    Client, NoTls,
+};
 
 pub struct PostgresConnection {
     credentials: PostgresCredentials,
@@ -19,7 +22,11 @@ impl PostgresConnection {
             "host = {} user = {} {}{} dbname = {}",
             self.credentials.host,
             self.credentials.username,
-            if self.credentials.pass_required { "password = " } else { "" },
+            if self.credentials.pass_required {
+                "password = "
+            } else {
+                ""
+            },
             self.credentials.password,
             self.credentials.database
         );
@@ -54,22 +61,25 @@ impl PostgresConnection {
                         let mut data: Vec<Box<dyn PostgresRow>> = Vec::new();
                         for c in &column_names {
                             if c.1 == Type::BOOL {
-                                let matched: Box<dyn PostgresRow> = match row.try_get::<&str, bool>(c.0.as_str()) {
-                                    Ok(val) => Box::new(PostgresBoolRow { value: val }),
-                                    Err(_) => Box::new(PostgresNullRow {})
-                                };
+                                let matched: Box<dyn PostgresRow> =
+                                    match row.try_get::<&str, bool>(c.0.as_str()) {
+                                        Ok(val) => Box::new(PostgresBoolRow { value: val }),
+                                        Err(_) => Box::new(PostgresNullRow {}),
+                                    };
                                 data.push(matched)
                             } else if c.1 == Type::INT2 || c.1 == Type::INT4 || c.1 == Type::INT8 {
-                                let matched: Box<dyn PostgresRow> = match row.try_get::<&str, i32>(c.0.as_str()) {
-                                    Ok(val) => Box::new(PostgresI32Row { value: val }),
-                                    Err(_) => Box::new(PostgresNullRow {})
-                                };
+                                let matched: Box<dyn PostgresRow> =
+                                    match row.try_get::<&str, i32>(c.0.as_str()) {
+                                        Ok(val) => Box::new(PostgresI32Row { value: val }),
+                                        Err(_) => Box::new(PostgresNullRow {}),
+                                    };
                                 data.push(matched)
                             } else if c.1 == Type::TEXT {
-                                let matched: Box<dyn PostgresRow> = match row.try_get::<&str, String>(c.0.as_str()) {
-                                    Ok(val) => Box::new(PostgresStringRow { value: val }),
-                                    Err(_) => Box::new(PostgresNullRow {})
-                                };
+                                let matched: Box<dyn PostgresRow> =
+                                    match row.try_get::<&str, String>(c.0.as_str()) {
+                                        Ok(val) => Box::new(PostgresStringRow { value: val }),
+                                        Err(_) => Box::new(PostgresNullRow {}),
+                                    };
                                 data.push(matched)
                             }
                         }
@@ -109,6 +119,38 @@ impl PostgresConnection {
             None
         }
     }
+
+    pub fn list_tables(&mut self) -> Option<Vec<String>> {
+        if let Some(client) = &mut self.client {
+            let tables = client
+                .query("select table_name from information_schema.tables where table_schema != 'pg_catalog' AND table_schema != 'information_schema'", &[])
+                .ok()?;
+            Some(
+                tables
+                    .iter()
+                    .map(|a| a.get("table_name"))
+                    .filter(|a: &String| !a.starts_with(&"pg_"))
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    }
+}
+
+pub struct PostgresTable {
+    pub columns: Vec<PostgresColumn>,
+    pub data: Vec<Vec<Box<dyn PostgresRow>>>,
+    pub name: String,
+}
+impl PostgresTable {
+    pub fn new() -> PostgresTable {
+        PostgresTable {
+            columns: Vec::new(),
+            data: Vec::new(),
+            name: String::new(),
+        }
+    }
 }
 
 pub struct PostgresResult {
@@ -123,51 +165,82 @@ pub struct PostgresColumn {
 }
 
 pub trait PostgresRow {
-    fn value(&self) -> String;
+    fn display(&self) -> String;
+    fn value(&self) -> Option<Box<dyn ToSql>>;
+}
+
+pub struct PostgresRowMatcher {}
+impl PostgresRowMatcher {
+    pub fn match_type(t: &String, data: &String) -> Box<dyn PostgresRow> {
+        if t == &"boolean".to_string() {
+            Box::new(PostgresBoolRow { value: data == "true" })
+        } else if t == &"text".to_string() {
+            Box::new(PostgresStringRow { value: data.clone() })
+        } else if t == &"number".to_string() {
+            Box::new(PostgresI32Row { value: data.parse().unwrap_or(0) })
+        } else {
+            Box::new(PostgresNullRow {})
+        }
+    }
 }
 
 pub struct PostgresStringRow {
     value: String,
 }
 impl PostgresRow for PostgresStringRow {
-    fn value(&self) -> String {
+    fn display(&self) -> String {
         return self.value.clone();
+    }
+    fn value(&self) -> Option<Box<dyn ToSql>> {
+        return Some(Box::new(self.value.clone()));
     }
 }
 pub struct PostgresI32Row {
     value: i32,
 }
 impl PostgresRow for PostgresI32Row {
-    fn value(&self) -> String {
+    fn display(&self) -> String {
         return self.value.to_string();
+    }
+    fn value(&self) -> Option<Box<dyn ToSql>> {
+        return Some(Box::new(self.value));
     }
 }
 pub struct PostgresBoolRow {
     value: bool,
 }
 impl PostgresRow for PostgresBoolRow {
-    fn value(&self) -> String {
+    fn display(&self) -> String {
         return if self.value {
             "true".to_string()
         } else {
             "false".to_string()
         };
     }
+    fn value(&self) -> Option<Box<dyn ToSql>> {
+        return Some(Box::new(self.value));
+    }
 }
 pub struct PostgresNullRow {}
 impl PostgresRow for PostgresNullRow {
-    fn value(&self) -> String {
+    fn display(&self) -> String {
         return String::new();
+    }
+
+    fn value(&self) -> Option<Box<dyn ToSql>> {
+        return None;
     }
 }
 
+#[derive(Debug)]
 pub struct PostgresCredentials {
     pub host: String,
     pub username: String,
     pub password: String,
     pub database: String,
-    pub pass_required: bool
+    pub pass_required: bool,
 }
+
 impl PostgresCredentials {
     const HOST_KEY: &str = "url";
     const USERNAME_KEY: &str = "user";
@@ -201,7 +274,7 @@ impl PostgresCredentials {
             username,
             password,
             database,
-            pass_required: nopass == "y"
+            pass_required: nopass != "y",
         }
     }
 }
